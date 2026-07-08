@@ -78,67 +78,112 @@ export default function App() {
     }
   };
 
-  // 2. Establish Server-Sent Events (SSE) connection on mount
+  // 2. Establish Server-Sent Events (SSE) connection on mount with auto-retry
   useEffect(() => {
-    setConnectionStatus("connecting");
-    const eventSource = new EventSource("/api/events");
+    let eventSource: EventSource | null = null;
+    let retryTimeout: any = null;
+    let isMounted = true;
 
-    eventSource.onopen = () => {
-      setConnectionStatus("connected");
-    };
+    const connectSSE = () => {
+      if (!isMounted) return;
+      setConnectionStatus("connecting");
 
-    eventSource.onerror = (err) => {
-      console.error("SSE connection error", err);
-      setConnectionStatus("disconnected");
-    };
-
-    eventSource.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        
-        switch (payload.type) {
-          case "NEW_FALL": {
-            const newEvt: FallEvent = payload.data;
-            setEvents((prev) => {
-              if (prev.some((e) => e.id === newEvt.id)) return prev;
-              return [newEvt, ...prev];
-            });
-            setSelectedEventId(newEvt.id);
-
-            // Trigger Vibration alert if supported in browser
-            if ("vibrate" in navigator) {
-              try {
-                navigator.vibrate([500, 200, 500, 200, 500]);
-              } catch (e) {
-                console.warn("Vibration blocked in iframe environment", e);
-              }
-            }
-            break;
-          }
-          case "FALL_RESOLVED": {
-            const updatedEvt: FallEvent = payload.data;
-            setEvents((prev) =>
-              prev.map((e) => (e.id === updatedEvt.id ? updatedEvt : e))
-            );
-            break;
-          }
-          case "HISTORY_RESET": {
-            setEvents(payload.data);
-            setSelectedEventId(payload.data[0]?.id || null);
-            break;
-          }
-          default:
-            break;
-        }
-      } catch (err) {
-        console.error("Failed parsing real-time event", err);
+      if (eventSource) {
+        eventSource.close();
       }
+
+      eventSource = new EventSource("/api/events");
+
+      eventSource.onopen = () => {
+        if (!isMounted) return;
+        setConnectionStatus("connected");
+      };
+
+      eventSource.onerror = (err) => {
+        if (!isMounted) return;
+        console.warn("SSE connection interrupted, initiating automatic backoff retry...", err);
+        setConnectionStatus("disconnected");
+        
+        if (eventSource) {
+          eventSource.close();
+        }
+
+        // Retry connection after 5 seconds to bypass intermittent network issues or idle timeouts
+        if (retryTimeout) clearTimeout(retryTimeout);
+        retryTimeout = setTimeout(() => {
+          connectSSE();
+        }, 5000);
+      };
+
+      eventSource.onmessage = (event) => {
+        if (!isMounted) return;
+        try {
+          const payload = JSON.parse(event.data);
+          
+          switch (payload.type) {
+            case "NEW_FALL": {
+              const newEvt: FallEvent = payload.data;
+              setEvents((prev) => {
+                if (prev.some((e) => e.id === newEvt.id)) return prev;
+                return [newEvt, ...prev];
+              });
+              setSelectedEventId(newEvt.id);
+
+              // Trigger Vibration alert if supported in browser
+              if ("vibrate" in navigator) {
+                try {
+                  navigator.vibrate([500, 200, 500, 200, 500]);
+                } catch (e) {
+                  console.warn("Vibration blocked in iframe environment", e);
+                }
+              }
+              break;
+            }
+            case "FALL_RESOLVED": {
+              const updatedEvt: FallEvent = payload.data;
+              setEvents((prev) =>
+                prev.map((e) => (e.id === updatedEvt.id ? updatedEvt : e))
+              );
+              break;
+            }
+            case "HISTORY_RESET": {
+              setEvents(payload.data);
+              setSelectedEventId(payload.data[0]?.id || null);
+              break;
+            }
+            default:
+              break;
+          }
+        } catch (err) {
+          console.error("Failed parsing real-time event", err);
+        }
+      };
     };
+
+    connectSSE();
 
     return () => {
-      eventSource.close();
+      isMounted = false;
+      if (eventSource) {
+        eventSource.close();
+      }
+      if (retryTimeout) {
+        clearTimeout(retryTimeout);
+      }
     };
   }, []);
+
+  // 3. Dual-channel background backup sync: Pull updates periodically if SSE is disconnected
+  useEffect(() => {
+    if (connectionStatus === "connected") return;
+
+    // Fast backup polling every 4 seconds when disconnected, to guarantee active synchronization
+    const backupInterval = setInterval(() => {
+      fetchEvents();
+    }, 4000);
+
+    return () => clearInterval(backupInterval);
+  }, [connectionStatus]);
 
   // 3. Resolve fall alert callback
   const handleResolveEvent = async (id: string, notes: string) => {
@@ -265,11 +310,15 @@ export default function App() {
               connectionStatus === "connected" 
                 ? "bg-emerald-950/20 border-emerald-500/40 text-emerald-400"
                 : connectionStatus === "connecting"
-                ? "bg-yellow-950/20 border-yellow-500/40 text-yellow-500"
-                : "bg-red-950/20 border-red-500/40 text-red-500"
+                ? "bg-yellow-950/20 border-yellow-500/40 text-yellow-500 animate-pulse"
+                : "bg-amber-950/20 border-amber-500/40 text-amber-500"
             }`}>
               <span className="font-mono">
-                {connectionStatus === "connected" ? "실시간 연동 상태: 연결됨" : "실시간 연동 상태: 연결 끊김"}
+                {connectionStatus === "connected" 
+                  ? "실시간 연동 상태: 연결됨" 
+                  : connectionStatus === "connecting"
+                  ? "실시간 연동 상태: 연결 중..."
+                  : "실시간 연동 상태: 무선 백업 동기화 작동 중"}
               </span>
             </div>
 

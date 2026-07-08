@@ -172,11 +172,12 @@ app.post("/api/fall/reset", (req, res) => {
 
 // Real-time: Server-Sent Events Endpoint
 app.get("/api/events", (req, res) => {
-  // Set headers for SSE
+  // Set headers for SSE (including no-transform and X-Accel-Buffering to prevent proxy buffering)
   res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive"
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no"
   });
 
   const clientId = `client-${Date.now()}`;
@@ -193,9 +194,24 @@ app.get("/api/events", (req, res) => {
 // Broadcast helper
 function broadcastToClients(event: { type: string; data: any }) {
   clients.forEach((client) => {
-    client.res.write(`data: ${JSON.stringify(event)}\n\n`);
+    try {
+      client.res.write(`data: ${JSON.stringify(event)}\n\n`);
+    } catch (err) {
+      console.error("Failed to write to SSE client:", err);
+    }
   });
 }
+
+// Periodic keep-alive ping (every 15 seconds) to prevent Cloud Run or Nginx from dropping the quiet connection
+setInterval(() => {
+  clients.forEach((client) => {
+    try {
+      client.res.write(":\n\n"); // SSE comment line acting as a heartbeat ping
+    } catch (err) {
+      // Failed client will be pruned on close event, but we catch potential errors
+    }
+  });
+}, 15000);
 
 // Vite integration: Development vs Production
 async function startServer() {
